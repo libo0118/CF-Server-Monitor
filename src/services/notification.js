@@ -34,6 +34,7 @@ import {
   RESOURCE_ALERT_NOTIFICATION_SOFT_LIMIT
 } from '../utils/config.js';
 import { getNotificationMessages } from './notificationMessages.js';
+import { buildNotificationSummary, buildNotificationHtmlCard } from './notificationCard.js';
 
 const RESOURCE_ALERT_STATE_ACTIVE = 'active';
 const RESOURCE_ALERT_STATE_RECOVERED = 'recovered';
@@ -296,6 +297,7 @@ function formatConciseResourceMetric(metric, valueKey, messages) {
 
 function buildGroupedResourceAlertEntries(nodes, valueKey, messages) {
   const groups = new Map();
+  const isRecovered = valueKey === 'current';
 
   for (const item of Array.isArray(nodes) ? nodes : []) {
     const serverName = String(item?.server?.name || '').trim();
@@ -306,15 +308,43 @@ function buildGroupedResourceAlertEntries(nodes, valueKey, messages) {
 
     let group = groups.get(serverName);
     if (!group) {
-      group = { serverName, metrics: [], seen: new Set() };
+      group = {
+        serverName,
+        serverGroup: String(item?.server?.server_group || '').trim(),
+        region: String(item?.server?.region || '').trim(),
+        metrics: [],
+        metricItems: [],
+        seen: new Set()
+      };
       groups.set(serverName, group);
     }
+
+    const mins = Number(item.rule?.intervalMinutes);
+    const windowSuffix = Number.isFinite(mins) && mins > 0
+      ? `（${mins}分钟${item.rule?.mode === 'continuous' ? '连续' : '均值'}）`
+      : '';
 
     for (const metric of sourceMetrics) {
       const text = formatConciseResourceMetric(metric, valueKey, messages);
       if (!text || group.seen.has(text)) continue;
       group.seen.add(text);
       group.metrics.push(text);
+      const rawValue = metric?.[valueKey] ?? metric?.current;
+      const thresholdVal = Number(metric?.threshold);
+      const hasThreshold = Number.isFinite(thresholdVal) && thresholdVal > 0;
+      const thresholdText = hasThreshold
+        ? (isRecovered
+          ? `低于 ${formatResourceMetricValue(metric, thresholdVal)} 阈值`
+          : `阈值 ≥ ${formatResourceMetricValue(metric, thresholdVal)}${windowSuffix}`)
+        : '';
+      group.metricItems.push({
+        metric: metric?.metric,
+        label: getResourceMetricLabel(metric, messages),
+        rawValue,
+        valueText: formatResourceMetricValue(metric, rawValue),
+        percent: (metric?.metric === 'cpu' || metric?.metric === 'ram' || metric?.metric === 'disk') ? Number(rawValue) : null,
+        thresholdText
+      });
     }
   }
 
@@ -322,6 +352,9 @@ function buildGroupedResourceAlertEntries(nodes, valueKey, messages) {
     .filter(group => group.metrics.length > 0)
     .map(group => ({
       serverName: group.serverName,
+      serverGroup: group.serverGroup,
+      region: group.region,
+      metricItems: group.metricItems,
       text: `${group.serverName}  ${group.metrics.join('  ')}`
     }));
 }
@@ -339,10 +372,18 @@ function appendResourceAlertNotificationChunks(payloads, entries, options) {
       msg: nodeList,
       context: {
         event: options.event,
+        eventKind: options.eventKind,
         emoji: options.emoji,
         clients: chunkClients,
         count: new Set(chunkClients).size || chunkEntries.length,
-        message: nodeList
+        message: nodeList,
+        items: chunkEntries.map(entry => ({
+          name: entry.serverName,
+          group: entry.serverGroup || '',
+          region: entry.region || '',
+          statusLabel: options.statusLabel,
+          metrics: entry.metricItems || []
+        }))
       }
     });
     chunkEntries = [];
@@ -371,6 +412,8 @@ export function buildResourceAlertNotificationPayloads(alertNodes, recoveredNode
     buildGroupedResourceAlertEntries(alertNodes, 'triggerValue', messages),
     {
       event: messages.events.resourceAlert,
+      eventKind: 'resource_alert',
+      statusLabel: '超阈值',
       emoji: '❌'
     }
   );
@@ -379,6 +422,8 @@ export function buildResourceAlertNotificationPayloads(alertNodes, recoveredNode
     buildGroupedResourceAlertEntries(recoveredNodes, 'current', messages),
     {
       event: messages.events.resourceRecovered,
+      eventKind: 'resource_recovered',
+      statusLabel: '已恢复',
       emoji: '✅'
     }
   );
@@ -534,7 +579,7 @@ function buildNotificationContext(settings, msg, context = {}) {
     ? Number(context.count)
     : clients.length;
   const event = context.event || inferNotificationEvent(msg, getNotificationMessages(settings).events.notification);
-  return {
+  const baseContext = {
     title: '💌 Cloudflare Server Monitor',
     event,
     emoji: context.emoji || inferNotificationEmoji(event),
@@ -542,7 +587,15 @@ function buildNotificationContext(settings, msg, context = {}) {
     clients: clients.join(', '),
     count: String(count),
     message: context.message || String(msg || ''),
-    time: context.time || now
+    time: context.time || now,
+    event_kind: String(context.eventKind || '')
+  };
+  const summary = String(context.summary || buildNotificationSummary({ ...baseContext, eventKind: context.eventKind, items: context.items }, settings));
+  const html_card = buildNotificationHtmlCard({ ...baseContext, eventKind: context.eventKind, items: context.items, summary }, settings);
+  return {
+    ...baseContext,
+    summary,
+    html_card
   };
 }
 
@@ -735,10 +788,25 @@ export async function evaluateTrafficAlert(env, server, metrics, hooks = {}) {
     const msg = `${serverName}  ${usage}`;
     const err = await sendNotification(settings, msg, {
       event: messages.events.trafficAlert,
+      eventKind: 'traffic_alert',
       emoji: '📈',
       clients: [serverName],
       count: 1,
-      message: msg
+      message: msg,
+      items: [{
+        name: serverName,
+        group: server.server_group || '',
+        region: server.region || '',
+        statusLabel: '流量超限',
+        metrics: [{
+          metric: 'traffic',
+          label: '月流量',
+          rawValue: percent,
+          valueText: `${(used / GB).toFixed(1)} GB / ${limit} GB (${percent.toFixed(1)}%)`,
+          percent,
+          thresholdText: `阈值 ≥ ${effectivePct}%`
+        }]
+      }]
     });
     if (err) return; // 失败：不写，下次上报重试
 
@@ -1098,6 +1166,8 @@ export async function checkOfflineNodes(db, options = {}) {
       if (isOffline && !alertState[s.id]) {
         offlineNodes.push({
           name: s.name,
+          group: s.server_group || '',
+          region: s.region || '',
           lastReportTime
         });
         alertState[s.id] = true;
@@ -1121,10 +1191,21 @@ export async function checkOfflineNodes(db, options = {}) {
       const msg = nodeList;
       await sendNotification(siteSettings, msg, {
         event: messages.events.offline,
+        eventKind: 'offline',
         emoji: '❌',
         clients: offlineNodes.map(n => n.name),
         count: offlineNodes.length,
-        message: nodeList
+        message: nodeList,
+        items: offlineNodes.map(n => ({
+          name: n.name,
+          group: n.group,
+          region: n.region,
+          statusLabel: '已离线',
+          rows: [
+            { label: '最后上报', value: formatLastReportTime(n.lastReportTime, siteSettings) },
+            { label: '离线判定', value: `超过 ${tgNotifyMinutes} 分钟未上报` }
+          ]
+        }))
       });
     }
 
@@ -1133,10 +1214,20 @@ export async function checkOfflineNodes(db, options = {}) {
       const msg = nodeList;
       await sendNotification(siteSettings, msg, {
         event: messages.events.recovered,
+        eventKind: 'recovered',
         emoji: '✅',
         clients: recoveredNodes.map(n => n.name),
         count: recoveredNodes.length,
-        message: nodeList
+        message: nodeList,
+        items: recoveredNodes.map(n => ({
+          name: n.name,
+          group: n.server_group || '',
+          region: n.region || '',
+          statusLabel: '已上线',
+          rows: [
+            { label: '当前状态', value: '探针已重新连接并恢复上报' }
+          ]
+        }))
       });
     }
   } catch (e) {
@@ -1359,7 +1450,7 @@ export async function checkExpiringServers(db, options = {}) {
         ).bind(renewal.expire_date, billingCycle, s.id).run();
         s.expire_date = renewal.expire_date;
         s.billing_cycle = billingCycle;
-        renewedServers.push({ name: s.name, expire_date: renewal.expire_date });
+        renewedServers.push({ name: s.name, group: s.server_group || '', region: s.region || '', expire_date: renewal.expire_date });
         debug(`[Cron] 服务器 ${s.name} 已自动续费，到期日期更新为 ${s.expire_date}`);
       }
 
@@ -1376,7 +1467,7 @@ export async function checkExpiringServers(db, options = {}) {
       debug(`[Cron] 检测到服务器 ${s.name} 到期日期 ${s.expire_date}，剩余天数 ${days} 天`);
 
       if (days > 0 && days <= reminderDays) {
-        expiringServers.push({ name: s.name, expire_date: s.expire_date, days });
+        expiringServers.push({ name: s.name, group: s.server_group || '', region: s.region || '', expire_date: s.expire_date, days });
       }
     }
 
@@ -1391,10 +1482,18 @@ export async function checkExpiringServers(db, options = {}) {
         try {
           await sendNotification(siteSettings, renewalList, {
             event: messages.events.renewed,
+            eventKind: 'renewed',
             emoji: '✅',
             clients: renewedServers.map(s => s.name),
             count: renewedServers.length,
-            message: renewalList
+            message: renewalList,
+            items: renewedServers.map(s => ({
+              name: s.name,
+              group: s.group,
+              region: s.region,
+              statusLabel: '已自动续费',
+              rows: [{ label: '新到期日', value: s.expire_date }]
+            }))
           });
         } catch (e) {
           console.error('自动续费成功通知发送失败:', e);
@@ -1409,10 +1508,22 @@ export async function checkExpiringServers(db, options = {}) {
       try {
         await sendNotification(siteSettings, msg, {
           event: messages.events.expiring,
+          eventKind: 'expiring',
           emoji: '⚠️',
           clients: expiringServers.map(s => s.name),
           count: expiringServers.length,
-          message: serverList
+          message: serverList,
+          items: expiringServers.map(s => ({
+            name: s.name,
+            group: s.group,
+            region: s.region,
+            days: s.days,
+            statusLabel: `剩余${s.days}天`,
+            rows: [
+              { label: '到期日期', value: s.expire_date },
+              { label: '剩余时间', value: messages.daysLeft(s.days) }
+            ]
+          }))
         });
       } catch (e) {
         console.error('服务器到期提醒通知发送失败:', e);
