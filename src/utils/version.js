@@ -7,7 +7,6 @@ const REMOTE_VERSION_FETCH_TIMEOUT_MS = 2000;
 let cachedRemoteVersion = null;
 let cachedRemoteVersionAt = 0;
 let cachedRemoteVersionFailureAt = 0;
-let remoteVersionPromise = null;
 
 export async function getRemoteVersion() {
   const now = Date.now();
@@ -17,15 +16,9 @@ export async function getRemoteVersion() {
   if (cachedRemoteVersionFailureAt && now - cachedRemoteVersionFailureAt < REMOTE_VERSION_FAILURE_TTL) {
     return cachedRemoteVersion;
   }
-  if (remoteVersionPromise) {
-    return remoteVersionPromise;
-  }
 
-  remoteVersionPromise = fetchRemoteVersion(now).finally(() => {
-    remoteVersionPromise = null;
-  });
-
-  return remoteVersionPromise;
+  // Avoid sharing an in-flight Promise across Worker requests (triggers handle_cross_request_promise_resolution when a prior request ends).
+  return fetchRemoteVersion(now);
 }
 
 async function fetchRemoteVersion(now) {
