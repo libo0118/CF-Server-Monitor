@@ -74,10 +74,21 @@ let flushDueAt = 0;
 let resolveFlushingPromise = null;
 let frontendSubscriberSnapshot = { checkedAt: 0, count: 0 };
 
+const MAX_FUTURE_CLOCK_SKEW_MS = 60 * 1000;
+
 function normalizeTimestamp(value, fallback = Date.now()) {
   const ts = Number(value);
   if (!Number.isFinite(ts) || ts <= 0) return fallback;
-  return ts < 10000000000 ? ts * 1000 : ts;
+  const ms = ts < 10000000000 ? ts * 1000 : ts;
+  return ms > fallback + MAX_FUTURE_CLOCK_SKEW_MS ? fallback : ms;
+}
+
+function sanitizeBootTime(value, now = Date.now()) {
+  if (value === null || value === undefined || value === '') return value;
+  const bt = Number(value);
+  if (!Number.isFinite(bt) || bt <= 0) return value;
+  const ms = bt < 10000000000 ? bt * 1000 : bt;
+  return ms > now + MAX_FUTURE_CLOCK_SKEW_MS ? '' : value;
 }
 
 export function normalizeAgentVersion(value) {
@@ -161,13 +172,19 @@ export function normalizeMetricSamples(data) {
     const metrics = item.metrics || item.data || item.payload || item;
     if (!metrics || typeof metrics !== 'object') return null;
     const ts = normalizeTimestamp(item.ts ?? item.timestamp ?? metrics.timestamp, now);
-    return { ts, metrics };
+    const safeMetrics = (metrics.boot_time !== undefined && sanitizeBootTime(metrics.boot_time, now) === '')
+      ? { ...metrics, boot_time: '' }
+      : metrics;
+    return { ts, metrics: safeMetrics };
   }).filter(Boolean);
 
   if (samples.length === 0 && data.metrics && typeof data.metrics === 'object') {
+    const safeMetrics = (data.metrics.boot_time !== undefined && sanitizeBootTime(data.metrics.boot_time, now) === '')
+      ? { ...data.metrics, boot_time: '' }
+      : data.metrics;
     samples.push({
       ts: normalizeTimestamp(data.metrics.timestamp, now),
-      metrics: data.metrics
+      metrics: safeMetrics
     });
   }
 

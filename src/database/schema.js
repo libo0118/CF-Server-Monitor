@@ -584,11 +584,24 @@ export async function weeklyCleanup(db) {
 }
 
 export async function saveMetricsHistory(db, serverId, historyPartitionId, metrics, regionCode = '', timestamp = null, agentVersion = '') {
-  const historyId = buildHistoryId(historyPartitionId, timestamp);
+  const MAX_FUTURE_CLOCK_SKEW_MS = 60 * 1000;
+  const currentNow = Date.now();
   const rawTimestamp = Number(timestamp);
-  const now = Number.isFinite(rawTimestamp) && rawTimestamp > 0
+  const parsedTimestamp = Number.isFinite(rawTimestamp) && rawTimestamp > 0
     ? (rawTimestamp < 10000000000 ? rawTimestamp * 1000 : rawTimestamp)
-    : Date.now();
+    : currentNow;
+  const now = parsedTimestamp > currentNow + MAX_FUTURE_CLOCK_SKEW_MS ? currentNow : parsedTimestamp;
+  const historyId = buildHistoryId(historyPartitionId, now);
+
+  const sanitizeBootTime = (val) => {
+    if (val === null || val === undefined || val === '') return '';
+    const bt = Number(val);
+    if (Number.isFinite(bt) && bt > 0) {
+      const ms = bt < 10000000000 ? bt * 1000 : bt;
+      if (ms > currentNow + MAX_FUTURE_CLOCK_SKEW_MS) return '';
+    }
+    return val;
+  };
 
   const DISABLED_PROBE_VALUE = 'false';
 
@@ -665,7 +678,7 @@ export async function saveMetricsHistory(db, serverId, historyPartitionId, metri
     regionCode,
     metrics.ip_v4 || '0',
     metrics.ip_v6 || '0',
-    metrics.boot_time || '',
+    sanitizeBootTime(metrics.boot_time),
     parseFloat(metrics.net_rx_monthly) || 0,
     parseFloat(metrics.net_tx_monthly) || 0
     ).run();
