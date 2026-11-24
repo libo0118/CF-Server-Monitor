@@ -91,8 +91,9 @@ test('buildNotificationHtmlCard renders inline progress bars and escapes HTML sa
   });
   assert.doesNotMatch(html, /\n/);
   assert.doesNotMatch(html, /<script>/i);
+  assert.doesNotMatch(html, /linear-gradient|box-shadow|border-left:4px/i);
   assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
-  assert.match(html, /Home · CN/);
+  assert.match(html, /Home \/ CN/);
   assert.match(html, /width:88%/);
   assert.match(html, /阈值 ≥ 85%（5分钟均值）/);
   assert.match(html, /超阈值/);
@@ -134,8 +135,9 @@ test('sendNotification renders valid JSON webhook payload with {{summary}} and {
   assert.equal(requests.length, 1);
   assert.equal(requests[0].title, '阿里云-北京 内存92%');
   assert.equal(requests[0].template, 'html');
-  assert.match(requests[0].content, /Aliyun · CN/);
+  assert.match(requests[0].content, /Aliyun \/ CN/);
   assert.match(requests[0].content, /width:92%/);
+  assert.doesNotMatch(requests[0].content, /linear-gradient|box-shadow|border-left:4px/i);
 });
 
 test('buildNotificationSummary falls back cleanly when eventKind is absent', () => {

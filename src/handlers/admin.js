@@ -757,12 +757,11 @@ async function handleSendTestNotificationAction({ data }) {
       count: 1,
       message: messages.testMessage,
       items: [{
-        name: '推送通道连通测试',
-        statusLabel: '通道正常',
+        name: '通知通道',
+        statusLabel: '正常',
         rows: [
-          { label: '通知状态', value: 'PushPlus / 自定义 Webhook 已正常连通' },
-          { label: '监控覆盖', value: '节点上下线 · CPU / 内存 / 磁盘负载 · 自动恢复' },
-          { label: '卡片预览', value: '实时事件将直接展示「节点名 + 状态/数值」（如 阿里云-北京 内存92% / 极空间-虚拟机 已离线）' }
+          { label: '通道', value: 'Webhook 推送已连通' },
+          { label: '范围', value: '节点上下线、CPU / 内存 / 磁盘告警及恢复' }
         ]
       }]
     });
